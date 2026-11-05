@@ -9,28 +9,19 @@ namespace SponzaTest.Graphics;
 [StructLayout(LayoutKind.Sequential)]
 internal struct CompositeUniforms
 {
-
     public Matrix4x4 ProjInv, CamWorld, Cascade0, Cascade1, Cascade2, Cascade3;
-
     public Vector4 Splits, LightDir, LightColor, CamPos;
-
     public float Exposure;
-
     public uint CsmEnabled;
-
     public uint HasEnvironment;
-
     public float AmbientIntensity;
-
     public Vector4 EnvironmentSh0, EnvironmentSh1, EnvironmentSh2, EnvironmentSh3, EnvironmentSh4,
         EnvironmentSh5, EnvironmentSh6, EnvironmentSh7, EnvironmentSh8;
-
     public float SkyboxExposure;
-
     public uint EncodeSrgb;
-
     public Vector2 Padding;
 }
+
 public sealed class SceneRenderer : IDisposable
 {
     private readonly SdlGpuContext _context;
@@ -51,14 +42,29 @@ public sealed class SceneRenderer : IDisposable
         var swapchainFormat = GetGPUSwapchainTextureFormat(ctx.Device, ctx.Window);
         _encodeSrgb = swapchainFormat is not (GPUTextureFormat.R8G8B8A8UnormSRGB or GPUTextureFormat.B8G8R8A8UnormSRGB);
         var shaders = new ShaderManager(ctx);
-        _gbufferPipeline = shaders.CreatePipeline("gbuffer.vert", "gbuffer.frag", [GPUTextureFormat.R16G16B16A16Float, GPUTextureFormat.R8G8B8A8Unorm], true, cull: true);
-        _doubleSidedPipeline = shaders.CreatePipeline("gbuffer.vert", "gbuffer.frag", [GPUTextureFormat.R16G16B16A16Float, GPUTextureFormat.R8G8B8A8Unorm], true);
-        _compositePipeline = shaders.CreatePipeline("direct_csm_composite.vert", "direct_csm_composite.frag", [GetGPUSwapchainTextureFormat(ctx.Device, ctx.Window)], false, mesh: false);
+        var gbufferDescription = new PipelineDescription(
+            "gbuffer.vert", "gbuffer.frag",
+            [GPUTextureFormat.R16G16B16A16Float, GPUTextureFormat.R8G8B8A8Unorm],
+            PipelinePass.GBuffer, GPUCullMode.Back);
+        _gbufferPipeline = shaders.CreatePipeline(gbufferDescription);
+        _doubleSidedPipeline = shaders.CreatePipeline(gbufferDescription with { CullMode = GPUCullMode.None });
+        _compositePipeline = shaders.CreatePipeline(new(
+            "direct_csm_composite.vert", "direct_csm_composite.frag", [swapchainFormat], PipelinePass.Composite));
         _shadows = new CsmShadowSystem(ctx, shaders);
         _white = new GpuTexture(ctx, 1, 1, GPUTextureFormat.R8G8B8A8Unorm, GPUTextureUsageFlags.Sampler);
         _white.UploadLayer<byte>([255, 255, 255, 255], 4);
     }
 
+    private SceneGraph? _preparedScene;
+    private (long Meshes, long Materials, long Textures, long TextureData) _materialRevision;
+
+    private static (long, long, long, long) MaterialRevision => (
+        VersionedCollection<SceneMeshInstance>.Revision,
+        VersionedCollection<MaterialData>.Revision,
+        MaterialData.TextureRevision,
+        CpuTexture.DataRevision);
+
+    // Explicit calls also support CPU texture data populated after scene creation.
     public void PrepareMaterials(SceneGraph scene)
     {
         foreach (var material in scene.Meshes
@@ -83,6 +89,8 @@ public sealed class SceneRenderer : IDisposable
                 throw;
             }
         }
+        _preparedScene = scene;
+        _materialRevision = MaterialRevision;
     }
 
     private void Resize(int width, int height)
@@ -101,7 +109,8 @@ public sealed class SceneRenderer : IDisposable
 
     public void Draw(SceneGraph scene, Camera camera, float exposure = 1f, float ambientIntensity = 1f, float skyboxExposure = 1f)
     {
-        PrepareMaterials(scene);
+        if (!ReferenceEquals(_preparedScene, scene) || _materialRevision != MaterialRevision)
+            PrepareMaterials(scene);
         var command = SdlGpuContext.Check(AcquireGPUCommandBuffer(_context.Device));
         if (!WaitAndAcquireGPUSwapchainTexture(command, _context.Window, out var swapchain, out uint width, out uint height))
         {
@@ -139,14 +148,16 @@ public sealed class SceneRenderer : IDisposable
             StencilStoreOp = GPUStoreOp.DontCare
         };
         var pass = SdlGpuContext.Check(BeginGPURenderPass(command, (IntPtr)targets, 2, in depth));
+        GPUTextureSamplerBinding* materialSampler = stackalloc GPUTextureSamplerBinding[1];
         foreach (var instance in scene.Meshes)
         {
-            if (!instance.Visible || instance.GpuBuffers == null)
+            if (!instance.Visible || instance.GpuBuffers == null
+                || !instance.Mesh.Bounds.IntersectsClipVolume(instance.WorldMatrix * camera.ViewProjectionMatrix))
             {
                 continue;
             }
             ShaderManager.BindMesh(pass, instance.GpuBuffers);
-            Matrix4x4.Invert(instance.WorldMatrix, out var inverse);
+            var normalMatrix = instance.NormalMatrix;
             foreach (var group in instance.Mesh.Groups)
             {
                 var material = instance.Materials[group.MaterialIndex];
@@ -155,7 +166,7 @@ public sealed class SceneRenderer : IDisposable
                 {
                     ViewProj = camera.ViewProjectionMatrix,
                     Model = instance.WorldMatrix,
-                    NormalMat = Matrix4x4.Transpose(inverse),
+                    NormalMat = normalMatrix,
                     BaseColor = new(material.BaseColorLinear, 1),
                     HasTexture = material.GpuDiffuseTexture != null ? 1u : 0u,
                     Roughness = material.Roughness,
@@ -163,8 +174,8 @@ public sealed class SceneRenderer : IDisposable
                 };
                 ShaderManager.PushVertex(command, uniforms);
                 ShaderManager.PushFragment(command, uniforms);
-                BindGPUFragmentSamplers(pass, 0,
-                    new[] { (material.GpuDiffuseTexture ?? _white).Binding }, 1);
+                materialSampler[0] = (material.GpuDiffuseTexture ?? _white).Binding;
+                BindGPUFragmentSamplers(pass, 0, (IntPtr)materialSampler, 1);
                 DrawGPUIndexedPrimitives(pass, (uint)group.IndexCount, 1, (uint)group.StartIndex, 0, 0);
             }
         }
@@ -212,7 +223,7 @@ public sealed class SceneRenderer : IDisposable
             SkyboxExposure = MathF.Max(0, skyboxExposure),
             EncodeSrgb = _encodeSrgb ? 1u : 0u
         });
-        var samplers = new[]
+        GPUTextureSamplerBinding* samplers = stackalloc GPUTextureSamplerBinding[5]
         {
             _depth!.Binding,
             _normal!.Binding,
@@ -220,7 +231,7 @@ public sealed class SceneRenderer : IDisposable
             _shadows.ShadowMapArray.Binding,
             (scene.EnvironmentTexture ?? _white).Binding
         };
-        BindGPUFragmentSamplers(pass, 0, samplers, (uint)samplers.Length);
+        BindGPUFragmentSamplers(pass, 0, (IntPtr)samplers, 5);
         DrawGPUPrimitives(pass, 3, 1, 0, 0);
         EndGPURenderPass(pass);
     }

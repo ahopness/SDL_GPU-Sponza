@@ -5,7 +5,7 @@ namespace SponzaTest.Scene;
 
 public class SceneGraph : IDisposable
 {
-    public List<SceneMeshInstance> Meshes { get; } = new();
+    public VersionedCollection<SceneMeshInstance> Meshes { get; } = new();
     public DirectionalLightData DirLight { get; set; } = new();
     public GpuTexture? EnvironmentTexture { get; set; }
     public Vector4[] EnvironmentDiffuseSh { get; set; } = new Vector4[9];

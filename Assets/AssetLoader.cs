@@ -122,12 +122,18 @@ public class AssetLoader : IDisposable
         var parsedMeshes = GltfReader.ParseGltfFile(fullPath, rootTransform, overrideMaterial);
         var instances = new List<SceneMeshInstance>(parsedMeshes.Count);
 
+        var meshBuffers = new Dictionary<CpuMesh, GpuMeshBuffers>();
         foreach (var (cpuMesh, materials, worldMatrix) in parsedMeshes)
         {
+            if (!meshBuffers.TryGetValue(cpuMesh, out var buffers))
+            {
+                buffers = new GpuMeshBuffers(_ctx, cpuMesh);
+                meshBuffers.Add(cpuMesh, buffers);
+            }
             var inst = new SceneMeshInstance
             {
                 Mesh = cpuMesh,
-                GpuBuffers = new GpuMeshBuffers(_ctx, cpuMesh),
+                GpuBuffers = buffers,
                 WorldMatrix = worldMatrix
             };
             inst.Materials.AddRange(materials);

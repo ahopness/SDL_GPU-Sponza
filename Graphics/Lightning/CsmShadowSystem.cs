@@ -10,12 +10,9 @@ public unsafe class CsmShadowSystem : IDisposable
 
     private readonly SdlGpuContext _context;
 
-    public GpuTexture ShadowMapArray
-    { get; private set; }
+    public GpuTexture ShadowMapArray { get; private set; }
 
     private readonly IntPtr _shadowPipeline;
-
-    private readonly Dictionary<CpuMesh, (Vector3 Min, Vector3 Max)> _meshBounds = new();
 
     private (float Near, float Far) CalculateCasterDepth(SceneGraph scene, Matrix4x4 lightView)
     {
@@ -26,21 +23,11 @@ public unsafe class CsmShadowSystem : IDisposable
             {
                 continue;
             }
-            if (!_meshBounds.TryGetValue(instance.Mesh, out var bounds))
-            {
-                Vector3 minimum = new(float.PositiveInfinity), maximum = new(float.NegativeInfinity);
-                foreach (var vertex in instance.Mesh.Vertices)
-                {
-                    minimum = Vector3.Min(minimum, vertex.Position);
-                    maximum = Vector3.Max(maximum, vertex.Position);
-                }
-                bounds = (minimum, maximum);
-                _meshBounds[instance.Mesh] = bounds;
-            }
+            var bounds = instance.Mesh.Bounds;
             var transform = instance.WorldMatrix * lightView;
             for (int i = 0; i < 8; i++)
             {
-                Vector3 corner = new((i & 1) == 0 ? bounds.Min.X : bounds.Max.X, (i & 2) == 0 ? bounds.Min.Y : bounds.Max.Y, (i & 4) == 0 ? bounds.Min.Z : bounds.Max.Z);
+                Vector3 corner = bounds.GetCorner(i);
                 float z = Vector3.Transform(corner, transform).Z;
                 minZ = MathF.Min(minZ, z);
                 maxZ = MathF.Max(maxZ, z);
@@ -49,17 +36,15 @@ public unsafe class CsmShadowSystem : IDisposable
         return float.IsFinite(minZ) ? (-maxZ - 1f, MathF.Max(-maxZ, -minZ) + 1f) : (0.1f, 150f);
     }
 
-    public Matrix4x4[] CascadeViewProj
-    { get; } = new Matrix4x4[CascadeCount];
+    public Matrix4x4[] CascadeViewProj { get; } = new Matrix4x4[CascadeCount];
 
-    public Vector4 CascadeSplits
-    { get; private set; }
+    public Vector4 CascadeSplits { get; private set; }
 
     public CsmShadowSystem(SdlGpuContext ctx, ShaderManager shaders, int mapSize = 2048)
     {
         _context = ctx;
         ShadowMapArray = CreateMap(mapSize);
-        _shadowPipeline = shaders.CreatePipeline("shadow.vert", null, [], true);
+        _shadowPipeline = shaders.CreatePipeline(new("shadow.vert", "shadow.frag", [], PipelinePass.Shadow));
     }
 
     private GpuTexture CreateMap(int size) => new(_context, size, size, GPUTextureFormat.D32Float,
@@ -128,7 +113,6 @@ public unsafe class CsmShadowSystem : IDisposable
             Matrix4x4 lightProj = Camera.CreateOrthographicOffCenterZeroToOne(
                 -radius, radius, -radius, radius, depth.Near, depth.Far);
             CascadeViewProj[c] = SnapToShadowTexel(lightView * lightProj);
-
         }
     }
 
@@ -151,7 +135,8 @@ public unsafe class CsmShadowSystem : IDisposable
             ShadowMapArray.Dispose();
             ShadowMapArray = replacement;
         }
-        UpdateCascades(camera, scene.DirLight, scene);
+        if (scene.DirLight.CastShadow)
+            UpdateCascades(camera, scene.DirLight, scene);
         // Clear all layers, including inactive cascades, before sampling the array.
         for (uint c = 0; c < CascadeCount; c++)
         {
@@ -171,7 +156,8 @@ public unsafe class CsmShadowSystem : IDisposable
             {
                 foreach (var instance in scene.Meshes)
                 {
-                    if (!instance.Visible || !instance.CastShadow || instance.GpuBuffers == null)
+                    if (!instance.Visible || !instance.CastShadow || instance.GpuBuffers == null
+                        || !instance.Mesh.Bounds.IntersectsClipVolume(instance.WorldMatrix * CascadeViewProj[c]))
                     {
                         continue;
                     }

@@ -8,7 +8,17 @@ public class CpuTexture
     public string Name { get; set; } = "";
     public int Width { get; set; }
     public int Height { get; set; }
-    public byte[]? Rgba8Data { get; set; }
+    internal static long DataRevision { get; private set; }
+    private byte[]? _rgba8Data;
+    public byte[]? Rgba8Data
+    {
+        get => _rgba8Data;
+        set
+        {
+            _rgba8Data = value;
+            DataRevision++;
+        }
+    }
     public float[]? Rgba32FloatData { get; set; }
     public bool FlipY { get; set; }
 }

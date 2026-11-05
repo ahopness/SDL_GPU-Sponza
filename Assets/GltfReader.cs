@@ -8,6 +8,15 @@ namespace SponzaTest.Assets;
 
 public static class GltfReader
 {
+    private const int FloatComponent = 5126;
+    private const int UnsignedIntComponent = 5125;
+    private const int UnsignedShortComponent = 5123;
+    private const int UnsignedByteComponent = 5121;
+
+    private readonly record struct BufferView(int Buffer, int ByteOffset, int ByteLength, int ByteStride);
+    private readonly record struct Accessor(int BufferView, int ByteOffset, int Count, int ComponentType);
+    private readonly record struct AccessorData(byte[] Buffer, int Offset, int Stride, int Count, int ComponentType);
+
     public static byte[] DecodeImageRgba8(Stream stream, out int width, out int height)
     {
         using var image = Image.Load<Rgba32>(stream);
@@ -43,25 +52,29 @@ public static class GltfReader
         var buffers = ReadBuffers(root, baseDir, glbBinChunk);
 
         // Load bufferViews
-        var bufferViews = new List<(int Buffer, int ByteOffset, int ByteLength, int ByteStride)>();
-        if (root.TryGetProperty("bufferViews", out var bvElem))
+        var bufferViews = new List<BufferView>();
+        if (root.TryGetProperty("bufferViews", out var bufferViewElements))
         {
-            foreach (var bv in bvElem.EnumerateArray())
+            foreach (var bufferView in bufferViewElements.EnumerateArray())
             {
-                int b = bv.GetProperty("buffer").GetInt32();
-                int off = bv.TryGetProperty("byteOffset", out var o) ? o.GetInt32() : 0;
-                int len = bv.GetProperty("byteLength").GetInt32();
-                int stride = bv.TryGetProperty("byteStride", out var s) ? s.GetInt32() : 0;
-                bufferViews.Add((b, off, len, stride));
+                int bufferIndex = bufferView.GetProperty("buffer").GetInt32();
+                int byteOffset = bufferView.TryGetProperty("byteOffset", out var o) ? o.GetInt32() : 0;
+                int byteLength = bufferView.GetProperty("byteLength").GetInt32();
+                int stride = bufferView.TryGetProperty("byteStride", out var s) ? s.GetInt32() : 0;
+                bufferViews.Add(new BufferView(bufferIndex, byteOffset, byteLength, stride));
             }
         }
 
         // Load accessors
-        var accessors = new List<JsonElement>();
-        if (root.TryGetProperty("accessors", out var accElem))
+        var accessors = new List<Accessor>();
+        if (root.TryGetProperty("accessors", out var accessorElements))
         {
-            foreach (var acc in accElem.EnumerateArray())
-                accessors.Add(acc);
+            foreach (var accessorJson in accessorElements.EnumerateArray())
+                accessors.Add(new Accessor(
+                    accessorJson.TryGetProperty("bufferView", out var view) ? view.GetInt32() : -1,
+                    accessorJson.TryGetProperty("byteOffset", out var offset) ? offset.GetInt32() : 0,
+                    accessorJson.GetProperty("count").GetInt32(),
+                    accessorJson.GetProperty("componentType").GetInt32()));
         }
 
         // Load images
@@ -84,24 +97,24 @@ public static class GltfReader
         }
         var decodedImages = new Dictionary<int, CpuTexture>();
 
-        CpuTexture? GetDecodedImage(int texIdx)
+        CpuTexture? GetDecodedImage(int textureIndex)
         {
-            if (texIdx < 0 || texIdx >= textures.Count)
+            if (textureIndex < 0 || textureIndex >= textures.Count)
             {
                 return null;
             }
-            int imgIdx = textures[texIdx];
-            if (imgIdx < 0 || imgIdx >= images.Count)
+            int imageIndex = textures[textureIndex];
+            if (imageIndex < 0 || imageIndex >= images.Count)
             {
                 return null;
             }
-            if (decodedImages.TryGetValue(imgIdx, out var cached))
+            if (decodedImages.TryGetValue(imageIndex, out var cached))
             {
                 return cached;
             }
-            var imgJson = images[imgIdx];
+            var imgJson = images[imageIndex];
             byte[]? rawBytes = null;
-            string name = $"Image_{imgIdx}";
+            string name = $"Image_{imageIndex}";
             if (imgJson.TryGetProperty("uri", out var uriProp))
             {
                 string uri = uriProp.GetString() ?? "";
@@ -118,12 +131,12 @@ public static class GltfReader
                         rawBytes = File.ReadAllBytes(imgPath);
                 }
             }
-            else if (imgJson.TryGetProperty("bufferView", out var bvProp))
+            else if (imgJson.TryGetProperty("bufferView", out var bufferViewProperty))
             {
-                int bvIdx = bvProp.GetInt32();
-                var bv = bufferViews[bvIdx];
-                rawBytes = new byte[bv.ByteLength];
-                Buffer.BlockCopy(buffers[bv.Buffer], bv.ByteOffset, rawBytes, 0, bv.ByteLength);
+                int bufferViewIndex = bufferViewProperty.GetInt32();
+                var bufferView = bufferViews[bufferViewIndex];
+                rawBytes = new byte[bufferView.ByteLength];
+                Buffer.BlockCopy(buffers[bufferView.Buffer], bufferView.ByteOffset, rawBytes, 0, bufferView.ByteLength);
             }
             if (rawBytes == null)
             {
@@ -138,24 +151,24 @@ public static class GltfReader
                 Height = h,
                 Rgba8Data = rgba
             };
-            decodedImages[imgIdx] = texData;
+            decodedImages[imageIndex] = texData;
 
             return texData;
         }
 
         // Load materials
-        var matMap = new Dictionary<int, MaterialData>();
+        var materialsByIndex = new Dictionary<int, MaterialData>();
         if (overrideMaterial == null && root.TryGetProperty("materials", out var matsElem))
         {
             int mIdx = 0;
-            foreach (var matJson in matsElem.EnumerateArray())
+            foreach (var materialJson in matsElem.EnumerateArray())
             {
-                var matData = new MaterialData
+                var material = new MaterialData
                 {
-                    Name = matJson.TryGetProperty("name", out var n) ? (n.GetString() ?? $"Mat_{mIdx}") : $"Mat_{mIdx}",
-                    DoubleSided = matJson.TryGetProperty("doubleSided", out var ds) && ds.GetBoolean()
+                    Name = materialJson.TryGetProperty("name", out var n) ? (n.GetString() ?? $"Mat_{mIdx}") : $"Mat_{mIdx}",
+                    DoubleSided = materialJson.TryGetProperty("doubleSided", out var ds) && ds.GetBoolean()
                 };
-                if (matJson.TryGetProperty("pbrMetallicRoughness", out var pbr))
+                if (materialJson.TryGetProperty("pbrMetallicRoughness", out var pbr))
                 {
                     if (pbr.TryGetProperty("baseColorFactor", out var bcf))
                     {
@@ -166,107 +179,92 @@ public static class GltfReader
                         float g = arr.Current.GetSingle();
                         arr.MoveNext();
                         float b = arr.Current.GetSingle();
-                        matData.BaseColorLinear = new Vector3(r, g, b);
+                        material.BaseColorLinear = new Vector3(r, g, b);
                     }
                     if (pbr.TryGetProperty("baseColorTexture", out var bct) && bct.TryGetProperty("index", out var ti))
                     {
-                        matData.DiffuseMap = GetDecodedImage(ti.GetInt32());
+                        material.DiffuseMap = GetDecodedImage(ti.GetInt32());
                     }
                 }
-                matMap[mIdx] = matData;
+                materialsByIndex[mIdx] = material;
                 mIdx++;
             }
         }
 
-        Vector3[] ReadVec3Accessor(int accIdx)
+        AccessorData GetAccessorData(int accessorIndex, int elementSize)
         {
-            var acc = accessors[accIdx];
-            int count = acc.GetProperty("count").GetInt32();
-            int bvIdx = acc.GetProperty("bufferView").GetInt32();
-            int accOff = acc.TryGetProperty("byteOffset", out var ao) ? ao.GetInt32() : 0;
-            var bv = bufferViews[bvIdx];
-            int stride = bv.ByteStride > 0 ? bv.ByteStride : 12;
-            byte[] buf = buffers[bv.Buffer];
-            var res = new Vector3[count];
-            for (int i = 0; i < count; i++)
-            {
-                int pos = bv.ByteOffset + accOff + i * stride;
-                float x = BitConverter.ToSingle(buf, pos + 0);
-                float y = BitConverter.ToSingle(buf, pos + 4);
-                float z = BitConverter.ToSingle(buf, pos + 8);
-                res[i] = new Vector3(x, y, z);
-            }
-
-            return res;
+            var accessor = accessors[accessorIndex];
+            if (accessor.BufferView < 0)
+                throw new NotSupportedException("Accessors without a buffer view are not supported.");
+            var view = bufferViews[accessor.BufferView];
+            return new AccessorData(
+                buffers[view.Buffer], view.ByteOffset + accessor.ByteOffset,
+                view.ByteStride > 0 ? view.ByteStride : elementSize,
+                accessor.Count, accessor.ComponentType);
         }
 
-        Vector2[] ReadVec2Accessor(int accIdx)
+        Vector3[] ReadVec3Accessor(int accessorIndex)
         {
-            var acc = accessors[accIdx];
-            int count = acc.GetProperty("count").GetInt32();
-            int bvIdx = acc.GetProperty("bufferView").GetInt32();
-            int accOff = acc.TryGetProperty("byteOffset", out var ao) ? ao.GetInt32() : 0;
-            int compType = acc.GetProperty("componentType").GetInt32();
-            var bv = bufferViews[bvIdx];
-            byte[] buf = buffers[bv.Buffer];
-            var res = new Vector2[count];
-            if (compType == 5126) // FLOAT
+            var data = GetAccessorData(accessorIndex, 12);
+            var result = new Vector3[data.Count];
+            for (int i = 0; i < result.Length; i++)
             {
-                int stride = bv.ByteStride > 0 ? bv.ByteStride : 8;
-                for (int i = 0; i < count; i++)
+                int offset = data.Offset + i * data.Stride;
+                result[i] = new Vector3(
+                    BitConverter.ToSingle(data.Buffer, offset),
+                    BitConverter.ToSingle(data.Buffer, offset + 4),
+                    BitConverter.ToSingle(data.Buffer, offset + 8));
+            }
+            return result;
+        }
+
+        Vector2[] ReadVec2Accessor(int accessorIndex)
+        {
+            int componentType = accessors[accessorIndex].ComponentType;
+            var data = GetAccessorData(accessorIndex, componentType == FloatComponent ? 8 : 4);
+            var result = new Vector2[data.Count];
+            for (int i = 0; i < result.Length; i++)
+            {
+                int offset = data.Offset + i * data.Stride;
+                result[i] = componentType switch
                 {
-                    int pos = bv.ByteOffset + accOff + i * stride;
-                    float u = BitConverter.ToSingle(buf, pos + 0);
-                    float v = BitConverter.ToSingle(buf, pos + 4);
-                    res[i] = new Vector2(u, v);
-                }
+                    FloatComponent => new Vector2(
+                        BitConverter.ToSingle(data.Buffer, offset),
+                        BitConverter.ToSingle(data.Buffer, offset + 4)),
+                    UnsignedShortComponent => new Vector2(
+                        BitConverter.ToUInt16(data.Buffer, offset) / 65535f,
+                        BitConverter.ToUInt16(data.Buffer, offset + 2) / 65535f),
+                    _ => Vector2.Zero
+                };
             }
-            else if (compType == 5123) // UNSIGNED_SHORT normalized
-            {
-                int stride = bv.ByteStride > 0 ? bv.ByteStride : 4;
-                for (int i = 0; i < count; i++)
-                {
-                    int pos = bv.ByteOffset + accOff + i * stride;
-                    float u = BitConverter.ToUInt16(buf, pos + 0) / 65535f;
-                    float v = BitConverter.ToUInt16(buf, pos + 2) / 65535f;
-                    res[i] = new Vector2(u, v);
-                }
-            }
-
-            return res;
+            return result;
         }
 
-        uint[] ReadIndicesAccessor(int accIdx)
+        uint[] ReadIndicesAccessor(int accessorIndex)
         {
-            var acc = accessors[accIdx];
-            int count = acc.GetProperty("count").GetInt32();
-            int bvIdx = acc.GetProperty("bufferView").GetInt32();
-            int accOff = acc.TryGetProperty("byteOffset", out var ao) ? ao.GetInt32() : 0;
-            int compType = acc.GetProperty("componentType").GetInt32();
-            var bv = bufferViews[bvIdx];
-            byte[] buf = buffers[bv.Buffer];
-            var res = new uint[count];
-            if (compType == 5125) // UNSIGNED_INT
+            int componentType = accessors[accessorIndex].ComponentType;
+            int elementSize = componentType switch
             {
-                int stride = bv.ByteStride > 0 ? bv.ByteStride : 4;
-                for (int i = 0; i < count; i++)
-                    res[i] = BitConverter.ToUInt32(buf, bv.ByteOffset + accOff + i * stride);
-            }
-            else if (compType == 5123) // UNSIGNED_SHORT
+                UnsignedIntComponent => 4,
+                UnsignedShortComponent => 2,
+                _ => 1
+            };
+            var data = GetAccessorData(accessorIndex, elementSize);
+            var result = new uint[data.Count];
+            for (int i = 0; i < result.Length; i++)
             {
-                int stride = bv.ByteStride > 0 ? bv.ByteStride : 2;
-                for (int i = 0; i < count; i++)
-                    res[i] = BitConverter.ToUInt16(buf, bv.ByteOffset + accOff + i * stride);
+                int offset = data.Offset + i * data.Stride;
+                result[i] = componentType switch
+                {
+                    UnsignedIntComponent => BitConverter.ToUInt32(data.Buffer, offset),
+                    UnsignedShortComponent => BitConverter.ToUInt16(data.Buffer, offset),
+                    UnsignedByteComponent => data.Buffer[offset],
+                    _ => 0
+                };
             }
-            else if (compType == 5121) // UNSIGNED_BYTE
-            {
-                int stride = bv.ByteStride > 0 ? bv.ByteStride : 1;
-                for (int i = 0; i < count; i++)
-                    res[i] = buf[bv.ByteOffset + accOff + i * stride];
-            }
-
-            return res;
+            return result;
         }
+
         var meshesJson = new List<JsonElement>();
         if (root.TryGetProperty("meshes", out var mElem))
         {
@@ -281,31 +279,39 @@ public static class GltfReader
         }
         var results = new List<(CpuMesh Mesh, List<MaterialData> Materials, Matrix4x4 WorldMatrix)>();
 
-        void ReadMesh(int meshIdx, Matrix4x4 world)
+        var decodedMeshes = new Dictionary<int, (CpuMesh Mesh, List<MaterialData> Materials)>();
+
+        void ReadMesh(int meshIndex, Matrix4x4 world)
         {
-            var meshJson = meshesJson[meshIdx];
+            if (decodedMeshes.TryGetValue(meshIndex, out var cached))
+            {
+                // Each node owns its material slots, while geometry is shared.
+                results.Add((cached.Mesh, new List<MaterialData>(cached.Materials), world * rootTransform));
+                return;
+            }
+            var meshJson = meshesJson[meshIndex];
             var vertices = new List<MeshVertex>();
             var indices = new List<uint>();
             var groups = new List<SubMeshGroup>();
             var materials = new List<MaterialData>();
-            foreach (var prim in meshJson.GetProperty("primitives").EnumerateArray())
+            foreach (var primitive in meshJson.GetProperty("primitives").EnumerateArray())
             {
-                int mode = prim.TryGetProperty("mode", out var mp) ? mp.GetInt32() : 4;
+                int mode = primitive.TryGetProperty("mode", out var mp) ? mp.GetInt32() : 4;
                 if (mode != 4)
                 {
                     continue;
                 }
                 // TRIANGLES only
-                var attrs = prim.GetProperty("attributes");
-                if (!attrs.TryGetProperty("POSITION", out var posProp))
+                var attributes = primitive.GetProperty("attributes");
+                if (!attributes.TryGetProperty("POSITION", out var posProp))
                 {
                     continue;
                 }
                 var positions = ReadVec3Accessor(posProp.GetInt32());
-                Vector3[]? normals = attrs.TryGetProperty("NORMAL", out var norProp)
+                Vector3[]? normals = attributes.TryGetProperty("NORMAL", out var norProp)
                     ? ReadVec3Accessor(norProp.GetInt32())
                     : null;
-                Vector2[]? uvs = attrs.TryGetProperty("TEXCOORD_0", out var uvProp)
+                Vector2[]? uvs = attributes.TryGetProperty("TEXCOORD_0", out var uvProp)
                     ? ReadVec2Accessor(uvProp.GetInt32())
                     : null;
                 uint baseVertex = (uint)vertices.Count;
@@ -316,8 +322,8 @@ public static class GltfReader
                     Vector2 uv = uvs != null && i < uvs.Length ? new Vector2(uvs[i].X, 1.0f - uvs[i].Y) : Vector2.Zero;
                     vertices.Add(new MeshVertex(p, n, uv));
                 }
-                int startIdx = indices.Count;
-                if (prim.TryGetProperty("indices", out var idxProp))
+                int startIndex = indices.Count;
+                if (primitive.TryGetProperty("indices", out var idxProp))
                 {
                     uint[] primIndices = ReadIndicesAccessor(idxProp.GetInt32());
                     for (int i = 0; i < primIndices.Length; i++)
@@ -330,26 +336,26 @@ public static class GltfReader
                 }
                 if (normals == null)
                 {
-                    GenerateNormals(vertices, indices, startIdx);
+                    GenerateNormals(vertices, indices, startIndex);
                 }
-                MaterialData mat;
+                MaterialData material;
                 if (overrideMaterial != null)
-                    mat = overrideMaterial;
-                else if (prim.TryGetProperty("material", out var matIdxProp) && matMap.TryGetValue(matIdxProp.GetInt32(), out var foundMat))
-                    mat = foundMat;
+                    material = overrideMaterial;
+                else if (primitive.TryGetProperty("material", out var matIdxProp) && materialsByIndex.TryGetValue(matIdxProp.GetInt32(), out var foundMat))
+                    material = foundMat;
                 else
-                    mat = new MaterialData();
-                int matSlot = materials.IndexOf(mat);
-                if (matSlot < 0)
+                    material = new MaterialData();
+                int materialSlot = materials.IndexOf(material);
+                if (materialSlot < 0)
                 {
-                    matSlot = materials.Count;
-                    materials.Add(mat);
+                    materialSlot = materials.Count;
+                    materials.Add(material);
                 }
                 groups.Add(new SubMeshGroup
                 {
-                    StartIndex = startIdx,
-                    IndexCount = indices.Count - startIdx,
-                    MaterialIndex = matSlot
+                    StartIndex = startIndex,
+                    IndexCount = indices.Count - startIndex,
+                    MaterialIndex = materialSlot
                 });
             }
             if (vertices.Count > 0 && indices.Count > 0)
@@ -361,17 +367,18 @@ public static class GltfReader
                     Indices = indices.ToArray()
                 };
                 cpuMesh.Groups.AddRange(groups);
+                decodedMeshes[meshIndex] = (cpuMesh, materials);
                 results.Add((cpuMesh, materials, world * rootTransform));
             }
         }
 
-        void TraverseNode(int nodeIdx, Matrix4x4 parentWorld)
+        void TraverseNode(int nodeIndex, Matrix4x4 parentWorld)
         {
-            if (nodeIdx < 0 || nodeIdx >= nodesJson.Count)
+            if (nodeIndex < 0 || nodeIndex >= nodesJson.Count)
             {
                 return;
             }
-            var node = nodesJson[nodeIdx];
+            var node = nodesJson[nodeIndex];
             Matrix4x4 local = ReadLocalTransform(node);
             Matrix4x4 world = local * parentWorld;
             if (node.TryGetProperty("mesh", out var meshProp))

@@ -3,6 +3,15 @@ using static SDL3.SDL;
 
 namespace SponzaTest.Graphics;
 
+public enum PipelinePass { GBuffer, Shadow, Composite }
+
+public sealed record PipelineDescription(
+    string VertexShader,
+    string FragmentShader,
+    GPUTextureFormat[] ColorFormats,
+    PipelinePass Pass,
+    GPUCullMode CullMode = GPUCullMode.None);
+
 public sealed class ShaderManager
 {
     private readonly SdlGpuContext _context;
@@ -18,7 +27,7 @@ public sealed class ShaderManager
         {
             GPUShaderFormat.SPIRV => "spv",
             GPUShaderFormat.DXIL => "dxil",
-            _ => "msl"
+            GPUShaderFormat.MSL => "msl",
         };
         byte[] code = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Resources", "Shaders", "Compiled", $"{name}.{extension}"));
 
@@ -38,16 +47,19 @@ public sealed class ShaderManager
         }
     }
 
-    public unsafe IntPtr CreatePipeline(string vertex, string? fragment, GPUTextureFormat[] colors, bool depth, bool mesh = true, bool cull = false)
+    public unsafe IntPtr CreatePipeline(PipelineDescription description)
     {
-        var vertexShader = Load(vertex, GPUShaderStage.Vertex, 0, mesh ? 1u : 0u);
+        var colors = description.ColorFormats;
+        bool mesh = description.Pass != PipelinePass.Composite;
+        bool depth = description.Pass != PipelinePass.Composite;
+        bool isShadowPass = description.Pass == PipelinePass.Shadow;
+        var vertexShader = Load(description.VertexShader, GPUShaderStage.Vertex, 0, mesh ? 1u : 0u);
         IntPtr fragmentShader = IntPtr.Zero;
         try
         {
-            bool isShadowPass = fragment == null;
             uint samplerCount = isShadowPass ? 0u : mesh ? 1u : 5u;
             uint uniformCount = isShadowPass ? 0u : 1u;
-            fragmentShader = Load(fragment ?? "shadow.frag", GPUShaderStage.Fragment, samplerCount, uniformCount);
+            fragmentShader = Load(description.FragmentShader, GPUShaderStage.Fragment, samplerCount, uniformCount);
 
             var vertexBuffer = new GPUVertexBufferDescription
             {
@@ -95,13 +107,13 @@ public sealed class ShaderManager
                         VertexBufferDescriptions = mesh ? (IntPtr)(&vertexBuffer) : IntPtr.Zero,
                         NumVertexBuffers = mesh ? 1u : 0u,
                         VertexAttributes = mesh ? (IntPtr)attributes : IntPtr.Zero,
-                        NumVertexAttributes = mesh ? (fragment == null ? 1u : 3u) : 0u
+                        NumVertexAttributes = mesh ? (isShadowPass ? 1u : 3u) : 0u
                     },
                     PrimitiveType = GPUPrimitiveType.TriangleList,
                     RasterizerState = new()
                     {
                         FillMode = GPUFillMode.Fill,
-                        CullMode = cull ? GPUCullMode.Back : GPUCullMode.None,
+                        CullMode = description.CullMode,
                         FrontFace = GPUFrontFace.CounterClockwise
                     },
                     MultisampleState = new()
@@ -136,9 +148,10 @@ public sealed class ShaderManager
 
     public static unsafe void PushFragment<T>(IntPtr command, T value) where T : unmanaged => PushGPUFragmentUniformData(command, 0, (IntPtr)(&value), (uint)sizeof(T));
 
-    public static void BindMesh(IntPtr pass, GpuMeshBuffers mesh)
+    public static unsafe void BindMesh(IntPtr pass, GpuMeshBuffers mesh)
     {
-        BindGPUVertexBuffers(pass, 0, new[] { new GPUBufferBinding { Buffer = mesh.VertexBuffer.Handle } }, 1);
+        var vertex = new GPUBufferBinding { Buffer = mesh.VertexBuffer.Handle };
+        BindGPUVertexBuffers(pass, 0, (IntPtr)(&vertex), 1);
         var index = new GPUBufferBinding
         {
             Buffer = mesh.IndexBuffer.Handle

@@ -7,7 +7,23 @@ namespace SponzaTest.Graphics;
 public class CpuMesh
 {
     public string Name { get; set; } = "";
-    public MeshVertex[] Vertices { get; set; } = Array.Empty<MeshVertex>();
+    private MeshVertex[] _vertices = [];
+    private BoundingBox? _bounds;
+
+    public MeshVertex[] Vertices
+    {
+        get => _vertices;
+        set
+        {
+            _vertices = value;
+            InvalidateBounds();
+        }
+    }
+
+    public BoundingBox Bounds => _bounds ??= BoundingBox.FromVertices(_vertices);
+
+    // Call after editing vertex positions in place, before re-uploading the mesh.
+    public void InvalidateBounds() => _bounds = null;
     public uint[] Indices { get; set; } = Array.Empty<uint>();
     public List<SubMeshGroup> Groups { get; } = new();
 }
@@ -83,8 +99,34 @@ public class SceneMeshInstance
 {
     public CpuMesh Mesh { get; set; } = null!;
     public GpuMeshBuffers? GpuBuffers { get; set; }
-    public List<MaterialData> Materials { get; } = new();
-    public Matrix4x4 WorldMatrix { get; set; } = Matrix4x4.Identity;
+    public VersionedCollection<MaterialData> Materials { get; } = new();
+    private Matrix4x4 _worldMatrix = Matrix4x4.Identity;
+    private Matrix4x4? _normalMatrix;
+
+    public Matrix4x4 WorldMatrix
+    {
+        get => _worldMatrix;
+        set
+        {
+            if (_worldMatrix == value) return;
+            _worldMatrix = value;
+            _normalMatrix = null;
+        }
+    }
+
+    public Matrix4x4 NormalMatrix
+    {
+        get
+        {
+            if (_normalMatrix is not { } normal)
+            {
+                Matrix4x4.Invert(_worldMatrix, out var inverse);
+                normal = Matrix4x4.Transpose(inverse);
+                _normalMatrix = normal;
+            }
+            return normal;
+        }
+    }
     public bool Visible { get; set; } = true;
     public bool CastShadow { get; set; } = true;
 }
@@ -96,8 +138,32 @@ public class MaterialData
     public float Roughness { get; set; } = 0.8f;
     public float Metalness { get; set; } = 0.0f;
     public bool DoubleSided { get; set; }
-    public CpuTexture? DiffuseMap { get; set; }
-    public GpuTexture? GpuDiffuseTexture { get; set; }
+    internal static long TextureRevision { get; private set; }
+    private CpuTexture? _diffuseMap;
+    private GpuTexture? _gpuDiffuseTexture;
+
+    public CpuTexture? DiffuseMap
+    {
+        get => _diffuseMap;
+        set
+        {
+            if (ReferenceEquals(_diffuseMap, value)) return;
+            _diffuseMap = value;
+            _gpuDiffuseTexture?.Dispose();
+            _gpuDiffuseTexture = null;
+            TextureRevision++;
+        }
+    }
+
+    public GpuTexture? GpuDiffuseTexture
+    {
+        get => _gpuDiffuseTexture;
+        set
+        {
+            _gpuDiffuseTexture = value;
+            TextureRevision++;
+        }
+    }
 
     public static Vector3 SrgbHexToLinear(uint hex)
     {
