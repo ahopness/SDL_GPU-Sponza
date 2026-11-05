@@ -10,6 +10,6 @@ DEMO CONTROLS: Drag left to orbit, right or middle to pan, and scroll to zoom.
 
 ---
 
-I’ve tried to keep the code as simple as possible to make it easier to understand, though this comes at the cost of performance in some areas of rendering, so please keep that in mind.
+I’ve tried to keep the code as simple as possible to make it easier to understand, though this comes at the cost of performance in some areas of rendering, so please keep that in mind. Check the [optimized](https://github.com/ahopness/SDL_GPU-Sponza/tree/optimized) branch for some optimization possibilities in the codebase.
 
 I had some help from GPT-6.1 Sol in a few areas, mostly with parsers and in the implementation of certain algorithms. If anything seems confusing or redundant, that’s on me for not paying close enough attention. Any PRs aimed at simplifying the code are more than welcome.
